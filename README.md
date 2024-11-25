@@ -1,2 +1,3 @@
 # Final_Project_OSINT
 Development of Custom Open Source Intelligent Application
+This project involves collecting and integrating software vulnerability data from multiple sources, including NVD, CVE, and OSV, and storing it in a centralized database repository. The collected data will be cleaned, standardized, and queried for analysis. Our goal is to identify trends and patterns, such as the most vulnerable projects of 2024 or the prevalence of specific bug types like buffer overflows. These insights will be visualized through user-friendly dashboards to provide security experts with a clearer understanding of vulnerabilities and support more informed decision-making.
