@@ -1,11 +1,17 @@
 from flask import Flask, render_template, jsonify
 from db_handler import db, init_db, add_vulnerability, get_all_vulnerabilities
 import requests
-import re
-import os
-from pathlib import Path
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
-from machinelearning import run_linear_regression #for training our advanced machine learning model!
+from machinelearning import run_linear_regression
+
+
+
+import matplotlib.pyplot as plt
+from io import BytesIO
+import base64
+
 
 
 app = Flask(__name__)
@@ -20,6 +26,8 @@ headers = {
 }
 
 init_db(app)
+
+
 
 
 # Fetching Data from NVD
@@ -92,6 +100,8 @@ def calculate_statistics():
         "min": min(data)
     }
 
+
+
 def format_vulnerability_data(vulnerabilities):
     formatted_data = []
     for vuln in vulnerabilities:
@@ -140,53 +150,61 @@ def format_vulnerability_data(vulnerabilities):
 
 
 
-def fetch_data_cvsdetails():
-    for year in range(2012, 2014): 
-        fetch_data_cvsdetails_tech(year, 1, 6)  
-        fetch_data_cvsdetails_tech(year, 7, 12) 
+
+
+
+def fetch_page_data(url):
+    """
+    Fetches data from a single page and handles rate limiting.
+    """
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json().get('results', [])
+            print(response.status_code )
+            return data
+        elif response.status_code == 429:  # Handle rate limiting
+            retry_after = int(response.headers.get('Retry-After', 50))
+            print(f"Rate limit reached. Retrying after {retry_after} seconds...")
+            time.sleep(retry_after)
+            return fetch_page_data(url)  # Retry
+        else:
+            print(f"Error fetching URL {url}: {response.status_code}")
+            return []
+    except Exception as e:
+        print(f"Exception occurred for URL {url}: {e}")
+        return []
+
+
 
 
 def fetch_data_cvsdetails_tech(year, start_month, end_month):
     with app.app_context():
-        max_pages = 4
-        page = 1
-        while page <= max_pages:
-            url = f"{base_url}?outputFormat=json&publishDateStart={year}-{'0' + str(start_month) if start_month < 10 else str(start_month)}-01&publishDateEnd={year}-{'0' + str(end_month) if end_month < 10 else str(end_month)}-01&pageNumber={page}&resultsPerPage=50"
-            print(url)
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                data = response.json().get('results', [])
-                if not data:
-                    break
-                for item in data:
-                    add_vulnerability(item)
-                page += 1
-                time.sleep(2)
-            elif response.status_code == 429:
-                backoff_time = 10
-                for retry in range(5):
-                    print(f"Rate limit reached. Waiting for {backoff_time} seconds (attempt {retry + 1}).")
-                    time.sleep(backoff_time)
-                    response = requests.get(url, headers=headers)
-                    if response.status_code == 200:
-                        data = response.json().get('results', [])
-                        if not data:
-                            break
+        max_pages = 2
+        results_per_page = 50
+        urls = [
+            f"{base_url}?outputFormat=json&publishDateStart={year}-{'0' + str(start_month) if start_month < 10 else str(start_month)}-01&publishDateEnd={year}-{'0' + str(end_month) if end_month < 10 else str(end_month)}-01&pageNumber={page}&resultsPerPage={results_per_page}"
+            for page in range(1, max_pages + 1)
+        ]
+
+        all_data = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_url = {executor.submit(fetch_page_data, url): url for url in urls}
+            for future in as_completed(future_to_url):
+                try:
+                    data = future.result()
+                    if data:
                         for item in data:
-                            add_vulnerability(item)
-                        page += 1
-                        break
-                    backoff_time *= 2
-                else:
-                    print(f"Max retries reached for page {page} in year {year}. Skipping...")
-                    break
-            else:
-                print(f"Error fetching page {page} for {year}: {response.status_code}")
-                break
-
-
-
-
+                            try:
+                                add_vulnerability(item)
+                            except Exception as e:
+                                print(f"Error adding vulnerability: {e}")
+                        all_data.extend(data)
+                except Exception as e:
+                    print(f"Error processing future: {e}")
+        
+        print(f"Fetched {len(all_data)} vulnerabilities for {year}-{start_month} to {year}-{end_month}.")
+        return all_data
 
 
 
@@ -228,7 +246,9 @@ def count_records():
 @app.route('/fetch-data', methods=['POST'])
 def fetch_data_from_api():
     try:
-        fetch_data_cvsdetails()
+        for year in range(2012, 2024):
+            fetch_data_cvsdetails_tech(year, 4, 7)
+            #fetch_data_cvsdetails_tech(year, 7, 12)
         return jsonify({"message": "Data fetched successfully!"}), 200
     except Exception as e:
         return jsonify({"message": f"Error fetching data: {e}"}), 500
@@ -246,14 +266,42 @@ def charts():
     return render_template('charts.html')
 
 
+#@app.route('/Mlearning', methods=['GET'])
+#def Mlearning():
+#    try:
+#        vulnerabilities = get_all_vulnerabilities()
+#        predictions = run_linear_regression(vulnerabilities)
+#        return render_template('mlearning.html', predictions=predictions)
+#    except Exception as e:
+#        return render_template('mlearning.html', error=str(e))
+
+
+
+
 @app.route('/Mlearning', methods=['GET'])
 def Mlearning():
     try:
         vulnerabilities = get_all_vulnerabilities()
         predictions = run_linear_regression(vulnerabilities)
-        return render_template('mlearning.html', predictions=predictions)
+
+
+        plt.figure(figsize=(8, 4))
+        plt.plot(list(predictions.keys()), list(predictions.values()), marker='o', color='blue')
+        plt.title("Predicted Vulnerabilities")
+        plt.xlabel("Year")
+        plt.ylabel("Number of Vulnerabilities")
+
+        img = BytesIO()
+        plt.savefig(img, format='png')
+        img.seek(0)
+        plot_url = base64.b64encode(img.getvalue()).decode('utf8')
+        plt.close()
+
+        return render_template('mlearning.html', predictions=predictions, plot_url=plot_url)
     except Exception as e:
         return render_template('mlearning.html', error=str(e))
+
+
 
 
 
@@ -344,17 +392,19 @@ def calculate_severity():
 
     return jsonify(avg_severity_by_year)
 
+
 @app.route('/area-chart-data', methods=['GET'])
 def get_area_chart_data():
     records = get_all_vulnerabilities() 
-    vulnerabilities_by_year = {}
+    vulnerabilities_by_exploitability = {}
 
     for record in records:
-        year = record.data.get('cveYear')  
-        if year:
-            vulnerabilities_by_year[year] = vulnerabilities_by_year.get(year, 0) + 1
+        exploitability = record.data.get('maxCvssExploitabilityScore')
+        if exploitability:
+            exploitability = round(float(exploitability), 1)  # رند کردن به نزدیک‌ترین اعشار
+            vulnerabilities_by_exploitability[exploitability] = vulnerabilities_by_exploitability.get(exploitability, 0) + 1
 
-    sorted_vulnerabilities = dict(sorted(vulnerabilities_by_year.items()))
+    sorted_vulnerabilities = dict(sorted(vulnerabilities_by_exploitability.items()))
     return jsonify(sorted_vulnerabilities)
 
 
